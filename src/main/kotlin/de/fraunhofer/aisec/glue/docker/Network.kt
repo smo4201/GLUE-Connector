@@ -34,17 +34,19 @@ class Network internal constructor(
     suspend fun connect(
         container: Container,
         address: String? = null,
+        aliases: List<String>? = null,
     ) {
+        val endpointConfig =
+            mutableMapOf<String, Any>(
+                "IPAMConfig" to mapOf("IPv4Address" to address),
+            )
+        if (aliases != null) {
+            endpointConfig["Aliases"] = aliases
+        }
         val args =
             mapOf(
                 "Container" to container.name,
-                "EndpointConfig" to
-                    mapOf(
-                        "IPAMConfig" to
-                            mapOf(
-                                "IPv4Address" to address,
-                            ),
-                    ),
+                "EndpointConfig" to endpointConfig,
             )
 
         client.httpClient.post(client.endpoint("networks/$name/connect")) {

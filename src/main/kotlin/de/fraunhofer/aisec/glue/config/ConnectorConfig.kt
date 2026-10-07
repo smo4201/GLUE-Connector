@@ -42,6 +42,16 @@ class ConnectorConfig(
         URLBuilder(host = InetAddress.getLocalHost().hostAddress, port = 8080).build(),
     )
 
+    /**
+     * Public DNS domain name used for SNI-based routing of (A)TLS traffic to pipelines.
+     * When set, pipeline entry containers are assigned hostnames of the form
+     * `<pipelineId>.<publicDomain>` and connected to the Envoy mux network so
+     * that Envoy's SNI dynamic forward proxy can route TLS connections to them
+     * on a single port. When unset, the legacy random-ephemeral-port behaviour
+     * is used.
+     */
+    val publicDomain by stringProp()
+
     enum class EdcMode {
         NONE,
         COMPAT,

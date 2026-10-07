@@ -18,16 +18,12 @@ package de.fraunhofer.aisec.glue.pipeline.docker
 import com.fasterxml.jackson.databind.ObjectMapper
 import de.fraunhofer.aisec.glue.config.Config
 import de.fraunhofer.aisec.glue.config.ConfigManager
+import de.fraunhofer.aisec.glue.config.ConnectorConfig
 import de.fraunhofer.aisec.glue.docker.Container
 import de.fraunhofer.aisec.glue.docker.DockerClient
 import de.fraunhofer.aisec.glue.docker.Network
 import de.fraunhofer.aisec.glue.docker.model.*
-import de.fraunhofer.aisec.glue.pipeline.AugmentedGlueContainer
-import de.fraunhofer.aisec.glue.pipeline.Backend
-import de.fraunhofer.aisec.glue.pipeline.ContainerInfo
-import de.fraunhofer.aisec.glue.pipeline.ContainerPipeline
-import de.fraunhofer.aisec.glue.pipeline.IPv4Address
-import de.fraunhofer.aisec.glue.pipeline.IPv4Network
+import de.fraunhofer.aisec.glue.pipeline.*
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.ktor.server.config.*
 import kotlinx.coroutines.async
@@ -48,6 +44,7 @@ class DockerBackend(
             .subnets(subnetLen)
             .iterator()
     private val config = configManager.getConfig(::DockerConfig)
+    private val connectorConfig = configManager.getConfig(::ConnectorConfig)
 
     // Note: There is no reliable way to determine if running in a container.
     // Checking for .dockerenv is an implementation detail and the hostname can be overwritten.
@@ -64,7 +61,7 @@ class DockerBackend(
         close: suspend (R) -> Unit,
         map: suspend (Int, T) -> R,
     ): List<R> {
-        val completed = ConcurrentLinkedQueue<R>()
+        val completed = ConcurrentLinkedQueue<R & Any>()
         try {
             return coroutineScope {
                 input.mapIndexed { index, item -> async { map(index, item).also(completed::add) } }.awaitAll()
@@ -216,25 +213,36 @@ class DockerBackend(
             throw IllegalArgumentException("The provided spec contains no containers")
         }
 
-        //       Alternatively, we can simply expose all ports that have a corresponding EXPOSE in the dockerfile.
-        //       While simpler, that could have unintended side effects and lead to over exposure
-        val publishPorts = listOf("8080/tcp")
+        val sniDomain = connectorConfig.publicDomain
+        val sniMode = sniDomain != null
 
-        containerCreateReqs[0] =
-            containerCreateReqs[0].copy(
-                exposedPorts = publishPorts.associateWith { emptyMap<Any, Any>() },
-                hostConfig =
-                    containerCreateReqs[0].hostConfig!!.copy(
-                        portBindings =
-                            publishPorts.associateWith {
-                                listOf(
-                                    PortBinding(
-                                        hostPort = "",
-                                    ),
-                                )
-                            },
-                    ),
-            )
+        if (!sniMode) {
+            // Legacy mode: publish port 8080 on a random ephemeral host port
+            val publishPorts = listOf("8080/tcp")
+            containerCreateReqs[0] =
+                containerCreateReqs[0].copy(
+                    exposedPorts = publishPorts.associateWith { emptyMap<Any, Any>() },
+                    hostConfig =
+                        containerCreateReqs[0].hostConfig!!.copy(
+                            portBindings =
+                                publishPorts.associateWith {
+                                    listOf(
+                                        PortBinding(
+                                            hostPort = "",
+                                        ),
+                                    )
+                                },
+                        ),
+                )
+        } else {
+            // SNI mode: set the hostname of the entry container to the pipeline FQDN.
+            // No port publishing — Envoy routes TLS connections via SNI.
+            val fqdn = "$id.$sniDomain"
+            containerCreateReqs[0] =
+                containerCreateReqs[0].copy(
+                    hostname = fqdn,
+                )
+        }
 
         val containers = createContainers(id, containerCreateReqs)
         val networks =
@@ -245,7 +253,27 @@ class DockerBackend(
                 throw e
             }
 
-        return DockerContainerPipeline(id, contractId, targetId, objectMapper, containers, networks, config)
+        if (sniMode) {
+            // Connect the entry container to the Envoy mux network with the FQDN as
+            // a network alias so that Envoy (also on that network) can resolve it
+            // via Docker's embedded DNS.
+            val fqdn = "$id.$sniDomain"
+            try {
+                val envoyNet = dockerClient.networks.get(config.envoyNetworkName)
+                envoyNet.connect(containers[0], aliases = listOf(fqdn))
+            } catch (e: Exception) {
+                LOG.atError {
+                    message = "Failed to connect entry container to Envoy mux network"
+                    cause = e
+                    payload = mapOf("container" to containers[0].name, "network" to config.envoyNetworkName)
+                }
+                containers.forEach { it.runCatching { remove() } }
+                networks.forEach { it.runCatching { remove() } }
+                throw e
+            }
+        }
+
+        return DockerContainerPipeline(id, contractId, targetId, objectMapper, containers, networks, config, sniDomain)
     }
 
     override suspend fun getConnectorIp(relativeTo: ContainerInfo): String {
@@ -303,6 +331,9 @@ class DockerBackend(
         inner: ApplicationConfig,
     ) : Config(inner) {
         val publicHostname: String by withDefault(stringProp(), InetAddress.getLocalHost().hostAddress)
+        val envoyNetworkName by withDefault(stringProp(), "envoy-mux")
+        val sniProxyPort by withDefault(intProp(), 8444)
+        val pipelineEntryPort by withDefault(intProp(), 8080)
     }
 
     companion object {

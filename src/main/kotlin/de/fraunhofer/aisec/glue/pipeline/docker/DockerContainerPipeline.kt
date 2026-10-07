@@ -41,6 +41,7 @@ class DockerContainerPipeline internal constructor(
     val containers: List<Container>,
     val networks: List<Network>,
     private val config: DockerBackend.DockerConfig,
+    private val sniDomain: String?,
 ) : ContainerPipeline(name, contractId, targetId) {
     private val closed = AtomicBoolean(false)
     private val followUpContracts: MutableMap<String, MutableSet<OdrlPolicy>> = mutableMapOf()
@@ -165,6 +166,21 @@ class DockerContainerPipeline internal constructor(
         containers[index].let { c ->
             val inspect = c.inspect()
 
+            val ports =
+                if (sniDomain != null && index == 0) {
+                    listOf(
+                        ContainerPort(
+                            containerPort = config.pipelineEntryPort.toUShort(),
+                            hostAddress = "$name.$sniDomain:${config.sniProxyPort}",
+                            protocol = "tcp",
+                        ),
+                    )
+                } else {
+                    inspect.networkSettings?.ports?.flatMap { (k, v) ->
+                        v?.let { parsePortBinding(k, v) } ?: emptyList()
+                    } ?: emptyList()
+                }
+
             ContainerInfo(
                 name = c.name,
                 ipAddresses =
@@ -172,10 +188,7 @@ class DockerContainerPipeline internal constructor(
                         ?.networks
                         ?.values
                         ?.mapNotNull(EndpointSettings::ipAddress) ?: emptyList(),
-                ports =
-                    inspect.networkSettings?.ports?.flatMap { (k, v) ->
-                        v?.let { parsePortBinding(k, v) } ?: emptyList()
-                    } ?: emptyList(),
+                ports = ports,
                 status = parseContainerStatus(inspect.state ?: throw IllegalStateException("Inspection has no state object")),
                 pid = inspect.state.pid,
             )

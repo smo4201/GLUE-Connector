@@ -121,12 +121,20 @@ class PipelineManager(
                 if (atlsConfig.enabled) {
                     // This determines if the public URL must be added to the pipeline cert as ip address or dns name
                     val hostnameIsIp = runCatching { IPv4Address.parse(connectorConfig.publicUrl.host) }.isSuccess
-                    val (dnsNames, ipAddresses) =
-                        if (hostnameIsIp) {
-                            Pair(listOf<String>(), listOf(connectorConfig.publicUrl.host))
-                        } else {
-                            Pair(listOf(connectorConfig.publicUrl.host), listOf())
-                        }
+                    val dnsNames = mutableListOf<String>()
+                    val ipAddresses = mutableListOf<String>()
+
+                    if (hostnameIsIp) {
+                        ipAddresses.add(connectorConfig.publicUrl.host)
+                    } else {
+                        dnsNames.add(connectorConfig.publicUrl.host)
+                    }
+
+                    // When SNI routing is enabled, add the pipeline FQDN so that the
+                    // ATLS proxy on the entry container can present a matching cert.
+                    connectorConfig.publicDomain?.let {
+                        dnsNames.add("$name.$it")
+                    }
 
                     cmcClient.tlsKey(name, dnsNames, ipAddresses)
                 } else {

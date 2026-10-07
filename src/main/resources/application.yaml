@@ -7,8 +7,12 @@ ktor:
 connector:
   identity: "https://glue-connector.local"
   publicUrl: "${?PUBLIC_URL}"
-  edc:
-    url: "http://localhost:29193"
+  publicDomain: "${?PUBLIC_DOMAIN}"
 atls:
+  enabled: false
   cmcAddress: "unix:/tmp/cmcd.sock"
   caCertPath: "/pki/ca-cert.pem"
+docker:
+  envoyNetworkName: "${?ENVOY_NETWORK_NAME}"
+  sniProxyPort: 8444
+  pipelineEntryPort: 8080
